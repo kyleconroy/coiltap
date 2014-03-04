@@ -12,6 +12,10 @@ storing the results in ElasticSearch.
 Coiltap doesn't currently work on Vagrant. I'm not sure, but something to do
 with the type of packets that are returned on `localhost`. 
 
+You'll need both Bison and Flex installed. On Ubuntu
+
+    sudo apt-get install yacc flex
+
 ## Interface
 
 ```go

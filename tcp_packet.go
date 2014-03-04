@@ -2,7 +2,7 @@ package main
 
 import (
 	"encoding/binary"
-    "fmt"
+	"fmt"
 	"strconv"
 	"strings"
 )

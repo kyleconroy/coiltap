@@ -1,15 +1,15 @@
 package main
 
 import (
-	"encoding/binary"
-    "bytes"
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
-	"net"
 	"strings"
 	"time"
 )
@@ -23,8 +23,8 @@ var verbose bool
 
 // Returns the string representation of a packet tuple
 func TCPTuple(t *TCPPacket, src net.Addr, dest net.Addr) string {
-    srcAddr := strings.Split(src.String(), "/")
-    destAddr := strings.Split(dest.String(), "/")
+	srcAddr := strings.Split(src.String(), "/")
+	destAddr := strings.Split(dest.String(), "/")
 	return fmt.Sprintf("%s:%d>%s:%d", srcAddr[0], int(t.SrcPort), destAddr[0], int(t.DestPort))
 }
 
@@ -35,7 +35,7 @@ func process(t *TCPPacket, src net.Addr, dest net.Addr, sink Sink, port int, bod
 		return fmt.Errorf("No TCP tuple")
 	}
 	if len(t.Payload) > 0 {
-        n := bytes.Index(t.Payload, []byte{0})
+		n := bytes.Index(t.Payload, []byte{0})
 		bodies[tuple] += string(t.Payload[:n])
 	}
 	if t.DestPort == uint16(port) && (t.Flags&TCP_SYN) != 0 {
@@ -45,9 +45,8 @@ func process(t *TCPPacket, src net.Addr, dest net.Addr, sink Sink, port int, bod
 	if t.DestPort == uint16(port) && (t.Flags&TCP_FIN != 0 || t.Flags&TCP_RST != 0) {
 		var requestID, responseID string
 
-		//FIXME
 		requestID = tuple
-        responseID = TCPTuple(&TCPPacket{SrcPort: t.DestPort, DestPort: t.SrcPort}, dest, src)
+		responseID = TCPTuple(&TCPPacket{SrcPort: t.DestPort, DestPort: t.SrcPort}, dest, src)
 
 		defer func() {
 			delete(times, requestID)
@@ -87,11 +86,11 @@ func process(t *TCPPacket, src net.Addr, dest net.Addr, sink Sink, port int, bod
 // HTTP traffic.
 //
 func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) {
-    addrs, err := device.Addrs()
+	addrs, err := device.Addrs()
 
-    if err != nil {
-            log.Fatal(err)
-    }
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	times := map[string]time.Time{}
 	bodies := map[string]string{}
@@ -99,7 +98,7 @@ func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) 
 	log.Printf("Listening to HTTP traffic on port %d on interface %s", port, device.Name)
 
 	for {
-        pktaddr := <-packets
+		pktaddr := <-packets
 		err := process(pktaddr.pkt, pktaddr.addr, addrs[0],
 			sink, port, bodies, times)
 		if verbose {
@@ -114,11 +113,11 @@ func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) 
 
 // A port is really just a fancy word for BPF filters
 func listen(packets chan *PacketAddr, iface net.Interface, port int) {
-    addrs, err := iface.Addrs()
-    if err != nil {
-            log.Fatal(err)
-    }
-    parts := strings.Split(addrs[0].String(), "/")
+	addrs, err := iface.Addrs()
+	if err != nil {
+		log.Fatal(err)
+	}
+	parts := strings.Split(addrs[0].String(), "/")
 	conn, err := net.ListenPacket("ip4:tcp", parts[0])
 
 	if err != nil {
@@ -151,6 +150,24 @@ func listen(packets chan *PacketAddr, iface net.Interface, port int) {
 	}
 }
 
+func capturePackets() {
+	snaplen := 65535
+	conn, _ := OpenLive("eth0", int32(snaplen), true, 100)
+
+    conn.SetFilter("port 3000")
+
+	buf := make([]byte, snaplen)
+
+	for {
+		n, hdr, _ := conn.ReadFrom(buf)
+        if n > 0 {
+			src := int(binary.BigEndian.Uint16(buf[0:2]))
+			dest := int(binary.BigEndian.Uint16(buf[2:4]))
+            log.Printf("%d %+v src:%d dest:%d", n, hdr, src, dest)
+        }
+	}
+}
+
 func main() {
 	var device, esurl string
 	var port int
@@ -167,11 +184,13 @@ func main() {
 
 	flag.Parse()
 
-    ifaces := []net.Interface{}
-    var err error
+	capturePackets()
+
+	ifaces := []net.Interface{}
+	var err error
 
 	if device == "" {
-        ifaces, err = net.Interfaces()
+		ifaces, err = net.Interfaces()
 		if err != nil || len(ifaces) == 0 {
 			log.Fatalf("Couldn't find any devices: %s", err)
 		}
