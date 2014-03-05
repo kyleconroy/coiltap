@@ -108,12 +108,12 @@ func (p *Pcap) ReadFrom(b []byte) (read int, hdr PacketHeader, err error) {
 		return
 	}
 
-    if result == 0 {
-            // THIS IS GARBAGE
-            // ERROR???
-}
+	if result == 0 {
+		// THIS IS GARBAGE
+		// ERROR???
+	}
 
-    read = int(pkthdr.caplen)
+	read = int(pkthdr.caplen)
 	hdr.Time = time.Unix(int64(pkthdr.ts.tv_sec), int64(pkthdr.ts.tv_usec)*1000)
 	hdr.Len = uint32(pkthdr.len)
 	hdr.Caplen = uint32(pkthdr.caplen)

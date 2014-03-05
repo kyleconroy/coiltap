@@ -1,9 +1,10 @@
 package main
 
 import (
+        "strconv"
 	"bufio"
 	"bytes"
-	"encoding/binary"
+	"code.google.com/p/go.net/ipv4"
 	"flag"
 	"fmt"
 	"log"
@@ -15,22 +16,20 @@ import (
 )
 
 type PacketAddr struct {
-	pkt  *TCPPacket
-	addr net.Addr
+	pkt *TCPPacket
+	hdr *ipv4.Header
 }
 
 var verbose bool
 
 // Returns the string representation of a packet tuple
-func TCPTuple(t *TCPPacket, src net.Addr, dest net.Addr) string {
-	srcAddr := strings.Split(src.String(), "/")
-	destAddr := strings.Split(dest.String(), "/")
-	return fmt.Sprintf("%s:%d>%s:%d", srcAddr[0], int(t.SrcPort), destAddr[0], int(t.DestPort))
+func TCPTuple(t *TCPPacket, hdr *ipv4.Header) string {
+	return fmt.Sprintf("%s:%d>%s:%d", hdr.Src, int(t.SrcPort), hdr.Dst, int(t.DstPort))
 }
 
-func process(t *TCPPacket, src net.Addr, dest net.Addr, sink Sink, port int, bodies map[string]string,
-	times map[string]time.Time) error {
-	tuple := TCPTuple(t, src, dest)
+func process(hdr *ipv4.Header, t *TCPPacket, sink Sink, port int,
+	bodies map[string]string, times map[string]time.Time) error {
+	tuple := TCPTuple(t, hdr)
 	if tuple == "" {
 		return fmt.Errorf("No TCP tuple")
 	}
@@ -38,15 +37,18 @@ func process(t *TCPPacket, src net.Addr, dest net.Addr, sink Sink, port int, bod
 		n := bytes.Index(t.Payload, []byte{0})
 		bodies[tuple] += string(t.Payload[:n])
 	}
-	if t.DestPort == uint16(port) && (t.Flags&TCP_SYN) != 0 {
+	if t.DstPort == uint16(port) && (t.Flags&TCP_SYN) != 0 {
 		times[tuple] = time.Now()
 	}
 	// It's all over
-	if t.DestPort == uint16(port) && (t.Flags&TCP_FIN != 0 || t.Flags&TCP_RST != 0) {
+	if t.DstPort == uint16(port) && (t.Flags&TCP_FIN != 0 || t.Flags&TCP_RST != 0) {
 		var requestID, responseID string
 
+		reversePacket := &TCPPacket{SrcPort: t.DstPort, DstPort: t.SrcPort}
+		reverseHeader := &ipv4.Header{Src: hdr.Dst, Dst: hdr.Src}
+
 		requestID = tuple
-		responseID = TCPTuple(&TCPPacket{SrcPort: t.DestPort, DestPort: t.SrcPort}, dest, src)
+		responseID = TCPTuple(reversePacket, reverseHeader)
 
 		defer func() {
 			delete(times, requestID)
@@ -86,12 +88,6 @@ func process(t *TCPPacket, src net.Addr, dest net.Addr, sink Sink, port int, bod
 // HTTP traffic.
 //
 func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) {
-	addrs, err := device.Addrs()
-
-	if err != nil {
-		log.Fatal(err)
-	}
-
 	times := map[string]time.Time{}
 	bodies := map[string]string{}
 
@@ -99,8 +95,7 @@ func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) 
 
 	for {
 		pktaddr := <-packets
-		err := process(pktaddr.pkt, pktaddr.addr, addrs[0],
-			sink, port, bodies, times)
+		err := process(pktaddr.hdr, pktaddr.pkt, sink, port, bodies, times)
 		if verbose {
 			if err != nil {
 				log.Printf("FAIL %+v: %s", pktaddr.pkt, err)
@@ -113,12 +108,8 @@ func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) 
 
 // A port is really just a fancy word for BPF filters
 func listen(packets chan *PacketAddr, iface net.Interface, port int) {
-	addrs, err := iface.Addrs()
-	if err != nil {
-		log.Fatal(err)
-	}
-	parts := strings.Split(addrs[0].String(), "/")
-	conn, err := net.ListenPacket("ip4:tcp", parts[0])
+	snaplen := 65535
+	conn, err := OpenLive(iface.Name, int32(snaplen), true, 100)
 
 	if err != nil {
 		log.Fatal(err)
@@ -126,11 +117,17 @@ func listen(packets chan *PacketAddr, iface net.Interface, port int) {
 
 	defer conn.Close()
 
-	buf := make([]byte, 65535)
+	err = conn.SetFilter("tcp port " + strconv.Itoa(port))
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	buf := make([]byte, snaplen)
 
 	for {
 		// Note: ReadFrom receive messages without IP header
-		n, a, err := conn.ReadFrom(buf)
+		n, _, err := conn.ReadFrom(buf)
 
 		if err != nil {
 			log.Println("Error:", err)
@@ -138,33 +135,99 @@ func listen(packets chan *PacketAddr, iface net.Interface, port int) {
 		}
 
 		if n > 0 {
-			src := int(binary.BigEndian.Uint16(buf[0:2]))
-			dest := int(binary.BigEndian.Uint16(buf[2:4]))
+			hdr, p, err := parsePacket(buf[:n])
 
-			if src == port || dest == port {
-				p := ParseTCPPacket(buf[:n])
-				pa := PacketAddr{pkt: p, addr: a}
-				packets <- &pa
+			if err != nil {
+				log.Println("Error:", err)
+				continue
 			}
+			pa := PacketAddr{pkt: p, hdr: hdr}
+			packets <- &pa
 		}
 	}
+}
+
+func IPPayload(h *ipv4.Header, b []byte) []byte {
+	end := h.TotalLen
+	if h.TotalLen > len(b) {
+		end = len(b)
+	}
+	return b[h.Len:end]
+}
+
+func parsePacket(buf []byte) (*ipv4.Header, *TCPPacket, error) {
+	lh, err := ParseLinkHeader(buf)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	log.Println(lh)
+
+	// We're assuming this is an IP packet
+	ipPacket := lh.Payload(buf)
+	hdr, err := ipv4.ParseHeader(ipPacket)
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	log.Println(hdr)
+
+	p, err := ParseTCPPacket(IPPayload(hdr, ipPacket))
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return hdr, p, nil
 }
 
 func capturePackets() {
 	snaplen := 65535
 	conn, _ := OpenLive("eth0", int32(snaplen), true, 100)
 
-    conn.SetFilter("port 3000")
+	log.Println("Listening on port 3000")
+	conn.SetFilter("tcp port 3000")
 
 	buf := make([]byte, snaplen)
 
 	for {
-		n, hdr, _ := conn.ReadFrom(buf)
-        if n > 0 {
-			src := int(binary.BigEndian.Uint16(buf[0:2]))
-			dest := int(binary.BigEndian.Uint16(buf[2:4]))
-            log.Printf("%d %+v src:%d dest:%d", n, hdr, src, dest)
-        }
+		n, _, _ := conn.ReadFrom(buf)
+
+		if n > 0 {
+			linkPacket := buf[:n]
+
+			lh, err := ParseLinkHeader(linkPacket)
+
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+
+			log.Println(lh)
+
+			// We're assuming this is an IP packet
+			ipPacket := lh.Payload(linkPacket)
+
+			hdr, err := ipv4.ParseHeader(ipPacket)
+
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+
+			log.Println(hdr)
+
+			p, err := ParseTCPPacket(IPPayload(hdr, ipPacket))
+
+			if err != nil {
+				log.Println(err)
+				continue
+			}
+
+			log.Println(p)
+		}
 	}
 }
 

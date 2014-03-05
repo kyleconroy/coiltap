@@ -25,7 +25,7 @@ const (
 // Packet structure: http://en.wikipedia.org/wiki/Transmission_Control_Protocol
 type TCPPacket struct {
 	SrcPort    uint16
-	DestPort   uint16
+	DstPort   uint16
 	Seq        uint32
 	Ack        uint32
 	DataOffset uint8
@@ -36,10 +36,14 @@ type TCPPacket struct {
 	Payload    []byte
 }
 
-func ParseTCPPacket(b []byte) (p *TCPPacket) {
+func ParseTCPPacket(b []byte) (*TCPPacket, error) {
+	if len(b) < 20 {
+		return nil, fmt.Errorf("need at least 20 bytes for a valid TCP packet")
+	}
+
 	t := &TCPPacket{
 		SrcPort:    binary.BigEndian.Uint16(b[0:2]),
-		DestPort:   binary.BigEndian.Uint16(b[2:4]),
+		DstPort:   binary.BigEndian.Uint16(b[2:4]),
 		Seq:        binary.BigEndian.Uint32(b[4:8]),
 		Ack:        binary.BigEndian.Uint32(b[8:12]),
 		Flags:      binary.BigEndian.Uint16(b[12:14]) & 0x1FF,
@@ -51,14 +55,13 @@ func ParseTCPPacket(b []byte) (p *TCPPacket) {
 
 	t.Payload = make([]byte, len(b))
 	copy(t.Payload, b[t.DataOffset*4:])
-
-	return t
+	return t, nil
 }
 
 func (t *TCPPacket) String() string {
-	return fmt.Sprintf("TCP %d > %d %s SEQ=%d ACK=%d",
-		int(t.SrcPort), int(t.DestPort), t.FlagsString(),
-		int64(t.Seq), int64(t.Ack))
+	return fmt.Sprintf("TCP %d > %d %s SEQ=%d ACK=%d LEN=%d",
+		int(t.SrcPort), int(t.DstPort), t.FlagsString(),
+		int64(t.Seq), int64(t.Ack), len(t.Payload))
 }
 
 func (t *TCPPacket) FlagsString() string {
@@ -96,7 +99,7 @@ func (t *TCPPacket) FlagsString() string {
 func (t *TCPPacket) Inspect() string {
 	return strings.Join([]string{
 		"Source port: " + strconv.Itoa(int(t.SrcPort)),
-		"Dest port:" + strconv.Itoa(int(t.DestPort)),
+		"Dest port:" + strconv.Itoa(int(t.DstPort)),
 		"Sequence:" + strconv.Itoa(int(t.Seq)),
 		"Acknowledgment:" + strconv.Itoa(int(t.Ack)),
 		"Header len:" + strconv.Itoa(int(t.DataOffset)),
