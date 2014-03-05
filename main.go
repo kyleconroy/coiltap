@@ -4,8 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"code.google.com/p/go.net/ipv4"
+	"code.google.com/p/gopacket"
+	"code.google.com/p/gopacket/layers"
+	"code.google.com/p/gopacket/tcpassembly"
+	"code.google.com/p/gopacket/tcpassembly/tcpreader"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
@@ -221,6 +226,133 @@ func parsePacket(buf []byte) (*ipv4.Header, *TCPPacket, error) {
 	return hdr, p, nil
 }
 
+type httpStreamFactory struct{}
+
+type requestStream struct {
+	net, transport gopacket.Flow
+	r              tcpreader.ReaderStream
+}
+
+type responseStream struct {
+	net, transport gopacket.Flow
+	r              tcpreader.ReaderStream
+}
+
+func (f httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream {
+	src := transport.Src().String()
+
+	if src == "3000" {
+		hstream := &responseStream{
+			net:       net,
+			transport: transport,
+			r:         tcpreader.NewReaderStream(),
+		}
+		go hstream.run()
+		return &hstream.r
+	} else {
+		hstream := &requestStream{
+			net:       net,
+			transport: transport,
+			r:         tcpreader.NewReaderStream(),
+		}
+		go hstream.run()
+		return &hstream.r
+	}
+}
+
+func (h *responseStream) run() {
+	buf := bufio.NewReader(&h.r)
+	for {
+		res, err := http.ReadResponse(buf, nil)
+		if err == io.EOF {
+			// We must read until we see an EOF... very important!
+			return
+		} else if err != nil {
+			log.Println("Error reading stream", h.net, h.transport, ":", err)
+		} else {
+			bodyBytes := tcpreader.DiscardBytesToEOF(res.Body)
+			res.Body.Close()
+			log.Println("Received response from stream", h.net, h.transport, ":", res, "with", bodyBytes, "bytes in request body")
+		}
+	}
+}
+
+func (h *requestStream) run() {
+	buf := bufio.NewReader(&h.r)
+	for {
+		req, err := http.ReadRequest(buf)
+		if err == io.EOF {
+			// We must read until we see an EOF... very important!
+			return
+		} else if err != nil {
+			log.Println("Error reading stream", h.net, h.transport, ":", err)
+		} else {
+			bodyBytes := tcpreader.DiscardBytesToEOF(req.Body)
+			req.Body.Close()
+			log.Println("Received request from stream", h.net, h.transport, ":", req, "with", bodyBytes, "bytes in request body")
+		}
+	}
+}
+
+func gogopacket() {
+	snaplen := 65535
+	port := 3000
+	conn, err := OpenLive("eth0", int32(snaplen), true, 100)
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	defer conn.Close()
+
+	err = conn.SetFilter("tcp port " + strconv.Itoa(port))
+
+	log.Printf("Listening to HTTP traffic on port %d on interface %s", port, "eth0")
+
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	buf := make([]byte, snaplen)
+
+	factory := httpStreamFactory{}
+	pool := tcpassembly.NewStreamPool(&factory)
+	assembler := tcpassembly.NewAssembler(pool)
+
+	var eth layers.Ethernet
+	var ip4 layers.IPv4
+	var ip6 layers.IPv6
+	var tcp layers.TCP
+	var payload gopacket.Payload
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp, &payload)
+	decoded := []gopacket.LayerType{}
+
+	for {
+		// Note: ReadFrom receive messages without IP header
+		n, _, err := conn.ReadFrom(buf)
+
+		if err != nil {
+			log.Println("sniffing error:", err)
+			continue
+		}
+
+		if n > 0 {
+			err := parser.DecodeLayers(buf[:n], &decoded)
+
+			if err != nil {
+				log.Println("decoding err:", err)
+				_, p, _ := parsePacket(buf[:n])
+				log.Println(p.String())
+				continue
+			}
+
+			//Isn't this wrong?
+			assembler.Assemble(ip4.NetworkFlow(), &tcp)
+			fmt.Println("Flow", tcp.TransportFlow())
+		}
+	}
+}
+
 func main() {
 	var device, esurl string
 	var port int
@@ -236,6 +368,8 @@ func main() {
 	}
 
 	flag.Parse()
+
+	gogopacket()
 
 	ifaces := []net.Interface{}
 	var err error
