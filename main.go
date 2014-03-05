@@ -1,7 +1,7 @@
 package main
 
 import (
-        "strconv"
+        "io/ioutil"
 	"bufio"
 	"bytes"
 	"code.google.com/p/go.net/ipv4"
@@ -11,7 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
+	"strconv"
 	"time"
 )
 
@@ -23,84 +23,122 @@ type PacketAddr struct {
 var verbose bool
 
 // Returns the string representation of a packet tuple
-func TCPTuple(t *TCPPacket, hdr *ipv4.Header) string {
-	return fmt.Sprintf("%s:%d>%s:%d", hdr.Src, int(t.SrcPort), hdr.Dst, int(t.DstPort))
+func tcptuple(src net.IP, srcPort uint16, dst net.IP, dstPort uint16) string {
+	return fmt.Sprintf("%s:%d>%s:%d", src, int(srcPort), dst, int(dstPort))
 }
 
-func process(hdr *ipv4.Header, t *TCPPacket, sink Sink, port int,
-	bodies map[string]string, times map[string]time.Time) error {
-	tuple := TCPTuple(t, hdr)
-	if tuple == "" {
-		return fmt.Errorf("No TCP tuple")
-	}
-	if len(t.Payload) > 0 {
-		n := bytes.Index(t.Payload, []byte{0})
-		bodies[tuple] += string(t.Payload[:n])
-	}
-	if t.DstPort == uint16(port) && (t.Flags&TCP_SYN) != 0 {
-		times[tuple] = time.Now()
-	}
-	// It's all over
-	if t.DstPort == uint16(port) && (t.Flags&TCP_FIN != 0 || t.Flags&TCP_RST != 0) {
-		var requestID, responseID string
+func parseRequest(packets chan *PacketAddr) *http.Request {
+	var b bytes.Buffer
 
-		reversePacket := &TCPPacket{SrcPort: t.DstPort, DstPort: t.SrcPort}
-		reverseHeader := &ipv4.Header{Src: hdr.Dst, Dst: hdr.Src}
-
-		requestID = tuple
-		responseID = TCPTuple(reversePacket, reverseHeader)
-
-		defer func() {
-			delete(times, requestID)
-			delete(times, responseID)
-			delete(bodies, requestID)
-			delete(bodies, responseID)
-		}()
-
-		requestPayload, qok := bodies[requestID]
-		responsePayload, sok := bodies[responseID]
-		if !sok {
-			return fmt.Errorf("No response payload for %s", responseID)
-		}
-		if !qok {
-			return fmt.Errorf("No request payload for %s", requestID)
+	for {
+		pktaddr := <-packets
+		pkt := pktaddr.pkt
+		// This shouldn't happen, but just in case it does
+		if len(pkt.Payload) == 0 {
+			continue
 		}
 
-		requestBuf := bufio.NewReader(strings.NewReader(requestPayload))
-		responseBuf := bufio.NewReader(strings.NewReader(responsePayload))
+		if verbose {
+			log.Printf("Processing request: %s ", pkt)
+		}
 
-		request, err := http.ReadRequest(requestBuf)
+		n := bytes.Index(pkt.Payload, []byte{0})
+		b.Write(pkt.Payload[:n])
+
+		request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(b.Bytes())))
+
 		if err != nil {
-			return fmt.Errorf("Request creation failed for %s: %s", requestID, err)
-		}
-		response, err := http.ReadResponse(responseBuf, request)
-		if err != nil {
-			return fmt.Errorf("Response creation failed for %s: %s", responseID, err)
+			log.Println("Error parsing request")
+			continue
 		}
 
+		return request
+	}
+}
+
+func parseResponse(packets chan *PacketAddr, req *http.Request) *http.Response {
+	var b bytes.Buffer
+
+	for {
+		pktaddr := <-packets
+		pkt := pktaddr.pkt
+
+		// This shouldn't happen, but just in case it does
+		if len(pkt.Payload) == 0 {
+			continue
+		}
+
+		if verbose {
+			log.Printf("Processing response: %s ", pkt)
+		}
+
+		n := bytes.Index(pkt.Payload, []byte{0})
+		b.Write(pkt.Payload[:n])
+
+		response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(b.Bytes())), req)
+
+		if err != nil {
+            log.Println("Error parsing response:", err)
+			continue
+		}
+
+        _, err = ioutil.ReadAll(response.Body)
+
+		if err != nil {
+            log.Println("Error parsing response body:", err)
+			continue
+		}
+
+		return response
+	}
+}
+
+func processStream(packets chan *PacketAddr, sink Sink, port int) {
+	for {
+		request := parseRequest(packets)
+		response := parseResponse(packets, request)
 		sink.Put(request, response, time.Second)
 	}
-	return nil
 }
 
 // Capture packets on the given device using libpcap. Only packets sent to or
 // from the given port are captured. The packets are reassembled back into the
 // HTTP traffic.
-//
 func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) {
-	times := map[string]time.Time{}
-	bodies := map[string]string{}
+	// Memory leak
+	// We need a way to clean up closed channels
+	streams := map[string]chan *PacketAddr{}
+	uport := uint16(port)
 
 	for {
+		var key string
 		pktaddr := <-packets
-		err := process(pktaddr.hdr, pktaddr.pkt, sink, port, bodies, times)
-		if verbose {
-			if err != nil {
-				log.Printf("FAIL %+v: %s", pktaddr.pkt, err)
-			} else {
-				log.Printf("OKAY %+v", pktaddr.pkt)
-			}
+		pkt := pktaddr.pkt
+		hdr := pktaddr.hdr
+
+		if pkt.SrcPort == uport {
+			key = tcptuple(hdr.Src, pkt.SrcPort, hdr.Dst, pkt.DstPort)
+		} else {
+			key = tcptuple(hdr.Dst, pkt.DstPort, hdr.Src, pkt.SrcPort)
 		}
+
+		stream, found := streams[key]
+
+		// If the packet if from the server and we haven't created a stream yet,
+		// this means that the connection started before capture, so we just throw
+		// this on the ground.
+		if !found && pkt.SrcPort == uport {
+			log.Println("Packet was from the server, so we already missed the request")
+			continue
+		}
+
+		if !found {
+			stream = make(chan *PacketAddr, 10)
+			streams[key] = stream
+			go processStream(stream, sink, port)
+		}
+
+		stream <- pktaddr
 	}
 }
 
@@ -141,9 +179,20 @@ func listen(packets chan *PacketAddr, iface net.Interface, port int) {
 				log.Println("Error:", err)
 				continue
 			}
+
+			// Only ship off packets with payloads
+			if len(p.Payload) == 0 {
+				continue
+			}
+
+            // Null bytes are coming from somewhere
+            // If the first byte is null, ignore
+		    nn := bytes.Index(p.Payload, []byte{0})
+            if nn == 0 {
+                    continue
+                }
+
 			pa := PacketAddr{pkt: p, hdr: hdr}
-            log.Println(hdr)
-            log.Println(p)
 			packets <- &pa
 		}
 	}

@@ -7,9 +7,9 @@ import (
 
 // Probably should go in different file
 type LinkHeader struct {
-	Type    int // protocol type, see LINKTYPE_*
+	Type   int // protocol type, see LINKTYPE_*
 	DstMac uint64
-	SrcMac  uint64
+	SrcMac uint64
 }
 
 func (lp *LinkHeader) String() string {
@@ -33,9 +33,9 @@ func ParseLinkHeader(b []byte) (*LinkHeader, error) {
 		return nil, fmt.Errorf("need at least 24 bytes for a valid ethernet frame")
 	}
 	lp := &LinkHeader{
-		Type:    int(binary.BigEndian.Uint16(b[12:14])),
+		Type:   int(binary.BigEndian.Uint16(b[12:14])),
 		DstMac: decodemac(b[0:6]),
-		SrcMac:  decodemac(b[6:12]),
+		SrcMac: decodemac(b[6:12]),
 	}
 	return lp, nil
 }

@@ -25,7 +25,7 @@ const (
 // Packet structure: http://en.wikipedia.org/wiki/Transmission_Control_Protocol
 type TCPPacket struct {
 	SrcPort    uint16
-	DstPort   uint16
+	DstPort    uint16
 	Seq        uint32
 	Ack        uint32
 	DataOffset uint8
@@ -43,7 +43,7 @@ func ParseTCPPacket(b []byte) (*TCPPacket, error) {
 
 	t := &TCPPacket{
 		SrcPort:    binary.BigEndian.Uint16(b[0:2]),
-		DstPort:   binary.BigEndian.Uint16(b[2:4]),
+		DstPort:    binary.BigEndian.Uint16(b[2:4]),
 		Seq:        binary.BigEndian.Uint32(b[4:8]),
 		Ack:        binary.BigEndian.Uint32(b[8:12]),
 		Flags:      binary.BigEndian.Uint16(b[12:14]) & 0x1FF,
