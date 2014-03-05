@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"code.google.com/p/go.net/ipv4"
 	"code.google.com/p/gopacket"
 	"code.google.com/p/gopacket/layers"
 	"code.google.com/p/gopacket/tcpassembly"
@@ -16,11 +15,6 @@ import (
 	"strconv"
 	"time"
 )
-
-type PacketAddr struct {
-	pkt *TCPPacket
-	hdr *ipv4.Header
-}
 
 var verbose bool
 
