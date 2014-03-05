@@ -297,15 +297,13 @@ func (h *requestStream) run() {
 func gogopacket() {
 	snaplen := 65535
 	port := 3000
-	conn, err := OpenLive("eth0", int32(snaplen), true, 100)
+	handle, err := OpenLiveNew("eth0", int32(snaplen), true, time.Second * 1)
 
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	defer conn.Close()
-
-	err = conn.SetFilter("tcp port " + strconv.Itoa(port))
+	err = handle.SetBPFFilter("tcp and port " + strconv.Itoa(port))
 
 	log.Printf("Listening to HTTP traffic on port %d on interface %s", port, "eth0")
 
@@ -313,44 +311,61 @@ func gogopacket() {
 		log.Fatal(err)
 	}
 
-	buf := make([]byte, snaplen)
+	//buf := make([]byte, snaplen)
 
 	factory := httpStreamFactory{}
 	pool := tcpassembly.NewStreamPool(&factory)
 	assembler := tcpassembly.NewAssembler(pool)
 
-	var eth layers.Ethernet
-	var ip4 layers.IPv4
-	var ip6 layers.IPv6
-	var tcp layers.TCP
-	var payload gopacket.Payload
-	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp, &payload)
-	decoded := []gopacket.LayerType{}
-
+	log.Println("reading in packets")
+	// Read in packets, pass to assembler.
+	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	packets := packetSource.Packets()
+	ticker := time.Tick(time.Minute)
 	for {
-		// Note: ReadFrom receive messages without IP header
-		n, _, err := conn.ReadFrom(buf)
-
-		if err != nil {
-			log.Println("sniffing error:", err)
-			continue
-		}
-
-		if n > 0 {
-			err := parser.DecodeLayers(buf[:n], &decoded)
-
-			if err != nil {
-				log.Println("decoding err:", err)
-				_, p, _ := parsePacket(buf[:n])
-				log.Println(p.String())
+		select {
+		case packet := <-packets:
+			if packet.NetworkLayer() == nil || packet.TransportLayer() == nil || packet.TransportLayer().LayerType() != layers.LayerTypeTCP {
+				log.Println("Unusable packet")
 				continue
 			}
-
-			//Isn't this wrong?
-			assembler.Assemble(ip4.NetworkFlow(), &tcp)
-			fmt.Println("Flow", tcp.TransportFlow())
+			tcp := packet.TransportLayer().(*layers.TCP)
+			assembler.Assemble(packet.NetworkLayer().NetworkFlow(), tcp)
+		case <-ticker:
+			// Every minute, flush connections that haven't seen activity in the past 2 minutes.
+			assembler.FlushOlderThan(time.Now().Add(time.Minute * -2))
 		}
 	}
+
+	//for {
+	//	var eth layers.Ethernet
+	//	var ip4 layers.IPv4
+	//	var ip6 layers.IPv6
+	//	var tcp layers.TCP
+	//	var payload gopacket.Payload
+	//	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp, &payload)
+	//	decoded := []gopacket.LayerType{}
+
+	//	n, _, err := conn.ReadFrom(buf)
+
+	//	if err != nil {
+	//		log.Println("sniffing error:", err)
+	//		continue
+	//	}
+
+	//	if n > 0 {
+	//		err := parser.DecodeLayers(buf[:n], &decoded)
+
+	//		if err != nil {
+	//			log.Println("err")
+	//			continue
+	//		}
+
+	//		//Isn't this wrong?
+	//        fmt.Println("flow:", tcp.TransportFlow(), "fin:", tcp.FIN, "syn:", tcp.SYN, "ack:", tcp.ACK)
+	//		assembler.Assemble(ip4.NetworkFlow(), &tcp)
+	//	}
+	//}
 }
 
 func main() {
