@@ -91,8 +91,6 @@ func sniff(packets chan *PacketAddr, device net.Interface, port int, sink Sink) 
 	times := map[string]time.Time{}
 	bodies := map[string]string{}
 
-	log.Printf("Listening to HTTP traffic on port %d on interface %s", port, device.Name)
-
 	for {
 		pktaddr := <-packets
 		err := process(pktaddr.hdr, pktaddr.pkt, sink, port, bodies, times)
@@ -119,6 +117,8 @@ func listen(packets chan *PacketAddr, iface net.Interface, port int) {
 
 	err = conn.SetFilter("tcp port " + strconv.Itoa(port))
 
+	log.Printf("Listening to HTTP traffic on port %d on interface %s", port, iface.Name)
+
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -142,6 +142,8 @@ func listen(packets chan *PacketAddr, iface net.Interface, port int) {
 				continue
 			}
 			pa := PacketAddr{pkt: p, hdr: hdr}
+            log.Println(hdr)
+            log.Println(p)
 			packets <- &pa
 		}
 	}
@@ -157,78 +159,20 @@ func IPPayload(h *ipv4.Header, b []byte) []byte {
 
 func parsePacket(buf []byte) (*ipv4.Header, *TCPPacket, error) {
 	lh, err := ParseLinkHeader(buf)
-
 	if err != nil {
 		return nil, nil, err
 	}
-
-	log.Println(lh)
-
 	// We're assuming this is an IP packet
 	ipPacket := lh.Payload(buf)
 	hdr, err := ipv4.ParseHeader(ipPacket)
-
 	if err != nil {
 		return nil, nil, err
 	}
-
-	log.Println(hdr)
-
 	p, err := ParseTCPPacket(IPPayload(hdr, ipPacket))
-
 	if err != nil {
 		return nil, nil, err
 	}
-
 	return hdr, p, nil
-}
-
-func capturePackets() {
-	snaplen := 65535
-	conn, _ := OpenLive("eth0", int32(snaplen), true, 100)
-
-	log.Println("Listening on port 3000")
-	conn.SetFilter("tcp port 3000")
-
-	buf := make([]byte, snaplen)
-
-	for {
-		n, _, _ := conn.ReadFrom(buf)
-
-		if n > 0 {
-			linkPacket := buf[:n]
-
-			lh, err := ParseLinkHeader(linkPacket)
-
-			if err != nil {
-				log.Println(err)
-				continue
-			}
-
-			log.Println(lh)
-
-			// We're assuming this is an IP packet
-			ipPacket := lh.Payload(linkPacket)
-
-			hdr, err := ipv4.ParseHeader(ipPacket)
-
-			if err != nil {
-				log.Println(err)
-				continue
-			}
-
-			log.Println(hdr)
-
-			p, err := ParseTCPPacket(IPPayload(hdr, ipPacket))
-
-			if err != nil {
-				log.Println(err)
-				continue
-			}
-
-			log.Println(p)
-		}
-	}
 }
 
 func main() {
@@ -246,8 +190,6 @@ func main() {
 	}
 
 	flag.Parse()
-
-	capturePackets()
 
 	ifaces := []net.Interface{}
 	var err error
