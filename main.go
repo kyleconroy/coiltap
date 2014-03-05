@@ -263,6 +263,12 @@ func (f httpStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream 
 func (h *responseStream) run() {
 	buf := bufio.NewReader(&h.r)
 	for {
+        _, err := buf.Peek(1)
+
+        if err == io.EOF {
+            return
+        }
+
 		res, err := http.ReadResponse(buf, nil)
 		if err == io.EOF {
 			// We must read until we see an EOF... very important!
@@ -280,6 +286,12 @@ func (h *responseStream) run() {
 func (h *requestStream) run() {
 	buf := bufio.NewReader(&h.r)
 	for {
+        _, err := buf.Peek(1)
+
+        if err == io.EOF {
+            return
+        }
+
 		req, err := http.ReadRequest(buf)
 		if err == io.EOF {
 			// We must read until we see an EOF... very important!
