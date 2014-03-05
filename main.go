@@ -1,12 +1,12 @@
 package main
 
 import (
-        "io/ioutil"
 	"bufio"
 	"bytes"
 	"code.google.com/p/go.net/ipv4"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -42,8 +42,7 @@ func parseRequest(packets chan *PacketAddr) *http.Request {
 			log.Printf("Processing request: %s ", pkt)
 		}
 
-		n := bytes.Index(pkt.Payload, []byte{0})
-		b.Write(pkt.Payload[:n])
+		b.Write(pkt.Payload)
 
 		request, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(b.Bytes())))
 
@@ -72,20 +71,19 @@ func parseResponse(packets chan *PacketAddr, req *http.Request) *http.Response {
 			log.Printf("Processing response: %s ", pkt)
 		}
 
-		n := bytes.Index(pkt.Payload, []byte{0})
-		b.Write(pkt.Payload[:n])
+		b.Write(pkt.Payload)
 
 		response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(b.Bytes())), req)
 
 		if err != nil {
-            log.Println("Error parsing response:", err)
+			log.Println("Error parsing response:", err)
 			continue
 		}
 
-        _, err = ioutil.ReadAll(response.Body)
+		_, err = ioutil.ReadAll(response.Body)
 
 		if err != nil {
-            log.Println("Error parsing response body:", err)
+			log.Println("Error parsing response body:", err)
 			continue
 		}
 
@@ -180,17 +178,16 @@ func listen(packets chan *PacketAddr, iface net.Interface, port int) {
 				continue
 			}
 
+			// Why am I getting null bytes here
+			if len(p.Payload) > 0 {
+				n := bytes.Index(p.Payload, []byte{0})
+				p.Payload = p.Payload[:n]
+			}
+
 			// Only ship off packets with payloads
 			if len(p.Payload) == 0 {
 				continue
 			}
-
-            // Null bytes are coming from somewhere
-            // If the first byte is null, ignore
-		    nn := bytes.Index(p.Payload, []byte{0})
-            if nn == 0 {
-                    continue
-                }
 
 			pa := PacketAddr{pkt: p, hdr: hdr}
 			packets <- &pa
